@@ -1,0 +1,217 @@
+# This will the pproject archeitecture:
+# Your Windows PC
+# │
+# ├── VS Code
+# │    │
+# │    └── FastAPI application
+# │
+# └── Docker Desktop
+#      │
+#      └── Redis container
+#           │
+#           └── Redis server
+
+# So, the FastAPI application will communicate with Redis through: localhost:6379
+
+# Now we need to understand what is a Docker container:
+# A container is an isolated environment that runs a specific application
+# so instead of installing Redis directly on Windows, we will run it inside a container. This way, we can easily manage dependencies and avoid conflicts with other applications on our system.
+
+# What we are going to do is to tell Docker to run Redis inside a container, and we will use the official Redis image from Docker Hub.
+# The image is a pre-built package that contains everything needed to run Redis, including the Redis server and its dependencies.
+
+# so in general what we are going to do is create a new docker container that will instantiate a Redis server using the official Redis images found on Docker Hub.
+
+#  => Docker then creates something like:
+
+# ┌─────────────────────────────┐
+# │       Redis Container       │
+# │                             │
+# │        Redis Server         │
+# │                             │
+# │        Port: 6379           │
+# └─────────────────────────────┘
+
+# no need to install Redis on manually on Windows
+
+# why to use Docker for Redis?
+# This is particularly useful for this projects since later this will be production environment that run Redis seperately from the API
+# For example:
+# Development: FastAPI ───────► Redis Container
+# Production: FastAPI ───────► Managed Redis
+# ===> Python application doesn't need to know whether Redis is running in Docker or whether it's a managed service.
+# ===>It only needs a Redis connection URL.
+
+# why port 6379?
+# Redis uses port 6379 by default for client connections.
+# currently for development purposes: FastAPI application will connect to Redis on local computer through port 6379
+
+# what Docker Compose is?
+# Docker Compose allows us to describe our services in a configuration file.
+# so instead of running multiple docker commands to start each service, we can define them in a single file and start them all with a single command.
+# docker compose up -d
+
+# ===> And Docker will create/start Redis.
+
+# to stop it:
+# docker compose down
+
+# to check if Redis is running:
+# docker compose ps
+
+# to test redis connection directly:
+# docker exec -it production-api-redis redis-cli ping
+# should return PONG if Redis is running and responsive.
+# Docker
+#   ↓
+# Redis container
+#   ↓
+# Redis server
+#   ↓
+# Redis is responding
+
+# what does -d mean?
+# -d means "detached mode", which runs the container in the background and allows you to continue using your terminal.
+
+# now what about Redis data:
+# Containers themselves are disposable. ===> If we simply create a Redis container and destroy it, data inside the container can disappear.
+
+#                 ┌───────────────┐
+#                 │    FastAPI    │
+#                 └───────┬───────┘
+#                         │
+#               ┌─────────┴─────────┐
+#               │                   │
+#          Cache Manager       RAG Pipeline
+#               │                   │
+#       ┌───────┴───────┐           │
+#       │               │           │
+#  Exact Cache    Semantic Cache    │
+#       │               │           │
+#       └───────┬───────┘           │
+#               │                   │
+#               ▼                   ▼
+#            Redis              Vector DB
+#                                   │
+#                                   ▼
+#                                  LLM
+
+# image: Docker downloads the official Redis image.
+# alpine means it uses a small Linux base image, keeping the container lightweight.
+
+# container_name: production-api-redis: sets the name of the container to "production-api-redis"
+
+# ports: - "6379:6379": maps port 6379 on the host machine to port 6379 in the container, allowing access to Redis from outside the container
+# Windows port 6379 → Redis container port 6379
+# Therefore your Python application can connect to: localhost:6379
+
+# volumes: - redis_data:/data: creates a named volume called "redis_data" and mounts it to the /data directory inside the container, ensuring that Redis data persists even if the container is removed.
+
+# command: redis-server --appendonly yes: starts the Redis server with the append-only file (AOF) persistence mode enabled, which logs every write operation to disk for data durability.
+
+# healthcheck: defines a health check for the Redis container, which periodically checks if the Redis server is responsive by sending a PING command using redis-cli. If the health check fails multiple times, Docker will consider the container unhealthy.
+
+services:
+  redis:
+    image: redis:8-alpine
+    container_name: production-api-redis
+    restart: unless-stopped
+
+    ports:
+      - "6379:6379"
+
+    volumes:
+      - redis_data:/data
+
+    command: redis-server --appendonly yes
+
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  redis_data:
+
+# after running the following commands and verifying the Redis server is running the Redis container:
+# docker compose up -d
+# docker compose ps:
+# docker exec -it production-api-redis redis-cli ping
+
+# to start the docker container:
+# docker start production-api-redis
+
+# we now need to connect the FastAPI application to the Redis server running inside the container.
+
+# 1- we need to install the Redis Package for Python:
+# uv add redis
+# this package provides a Python interface to interact with the Redis server.
+# we have the following:
+# FastAPI application ───────► Redis container ───────► Redis server
+# Redis client
+# Connection pooling
+# Async support
+# Timeouts
+# Authentication
+# TLS
+# Health checks
+# Redis commands
+
+# from redis.asyncio import Redis
+# This lets us communicate with Redis asynchronously, which is what we want in an async FastAPI application.
+
+# what we have now is Docker container running Redis server
+# after installing the Redis package for Python we will have
+
+# FastAPI
+# │
+# │  redis Python package
+# │
+# ▼
+# Redis
+# │
+# └── Docker container
+
+# The Python package is simply the client that allows your application to communicate with the Redis server.
+
+# but before creating the Redis client, we need to configure Redis with Pydantic settings.
+
+# we already have Pydantic settings for the FastAPI application
+# .env
+#  ↓
+# Pydantic Settings
+#  ↓
+# Redis configuration
+#  ↓
+# Redis client
+
+# Note: later on for production we just need to change the Local Redis to Production / Redis Cloud easily with changing the .env file
+
+# these what are needed to be added to the .env file
+# REDIS_URL
+# REDIS_MAX_CONNECTIONS
+# REDIS_SOCKET_TIMEOUT
+# REDIS_SOCKET_CONNECT_TIMEOUT
+# REDIS_HEALTH_CHECK_INTERVAL
+
+# REDIS_URL=redis://localhost:6379/0
+# this for local development: later on it will be ===> rediss://username:password@your-production-redis:6380/0
+# Note: redis:// means normal Redis coonnection, while rediss:// means a secure Redis connection using SSL/TLS.
+# why Redis DB 0? Redis supports multiple databases, numbered from 0 to 15 by default. In this case, we are using database 0, which is the default database for Redis. You can change the number if you want to use a different database.
+
+# REDIS_MAX_CONNECTIONS=20
+# Controls how many Redis connections your application can maintain in its pool.
+# We can tune this later based on actual traffic.
+
+# REDIS_SOCKET_TIMEOUT=5
+# How long the client waits for Redis to respond
+
+# REDIS_SOCKET_CONNECT_TIMEOUT=5
+# How long the client waits to establish a connection to Redis
+
+# REDIS_HEALTH_CHECK_INTERVAL=30
+# Allows the Redis client to periodically check whether an existing connection is still alive.
+
+
+# continue the implementation in the next steps in app.core.cache.redis_client.py

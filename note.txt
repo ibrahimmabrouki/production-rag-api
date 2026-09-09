@@ -1,0 +1,41 @@
+initialize the project
+1- uv init
+
+
+Download some packages
+2- uv add langchain-anthropic langgraph langsmith fastapi uvicorn slowapi pydantic-settings python-dotenv
+2'- uv add --dev pytest httpx 
+
+langchain-anthropic: Connects your application to Anthropic Claude models through LangChain.
+langgraph: Builds stateful AI workflows/agents using graphs and nodes. Useful for structuring your RAG pipeline.
+langsmith: Monitoring, tracing, debugging, and evaluating your LangChain/LangGraph applications.
+fastapi: Python web framework for building your REST API endpoints.
+uvicorn: ASGI server that actually runs your FastAPI application.
+ASGI = Asynchronous Server Gateway Interface.
+
+It's the standard that allows servers like Uvicorn to communicate with Python web frameworks like FastAPI.
+slowapi: Adds rate limiting to your API, e.g. limiting a user to 10 requests/minute.
+
+pydantic-settings: Manages configuration and environment variables, e.g. API keys, database URLs, model names.
+
+pytest (dev): Testing framework for writing and running automated tests.
+httpx (dev): HTTP client used mainly for testing FastAPI endpoints and making async HTTP requests.
+
+Client
+  ↓
+FastAPI
+  ↓
+SlowAPI → Rate limiting
+  ↓
+LangGraph → RAG workflow
+  ↓
+LangChain → LLM integration
+  ↓
+Anthropic / Claude
+  ↓
+LangSmith → Monitoring & tracing
+
+
+
+add the requirments file
+3-

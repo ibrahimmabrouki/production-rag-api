@@ -1,0 +1,28 @@
+logging {
+  level = "info"
+}
+
+local.file_match "application_logs" {
+  path_targets = [
+    {
+        __path__ = "/var/log/production-api/app.log",
+        job      = "production-api",
+    },
+  ]
+}
+
+loki.source.file "application_logs" {
+  targets    = local.file_match.application_logs.targets
+  forward_to = [loki.write.grafana.receiver]
+}
+
+loki.write "grafana" {
+  endpoint {
+    url = sys.env("GRAFANA_LOKI_URL")
+
+    basic_auth {
+      username = sys.env("GRAFANA_LOKI_USER")
+      password = sys.env("GRAFANA_LOKI_TOKEN")
+    }
+  }
+}

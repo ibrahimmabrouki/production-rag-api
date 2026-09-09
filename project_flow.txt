@@ -1,0 +1,638 @@
+ 
+ before continuig can you write a general diagram for what happening here exactly in detials, take into conisderation the security checkup in details the(iput check from prompt injection either failes and return since it is not allowed or sucessd and moves to the next step to check for pii injection (either it is good or perform pii masking and upadte the input security notes) then tacking the cleaned message to check in the first layer or token budgeting to check if the input is in the allowed range of tonken  either accept or rejecet the if there are engouh chat usage in detials the total chat token , the totatl chat request and the input token per conversation and this is based on the thread_id) then in the reserve rrquest applying the second layer of seurity to double check and this important when we have multiple requests (from different browser tabs for example) to different application workers to reserve request and read the chatusage using the chatrepositoryusage (which is responsible for reading and writing the chatusage in redis to be available at different application instances -different fast api workers-) from redis based on the prefix and chatid and again enforce the rules that are in the lua script -which should be excuted in redis- the if the request complies with the rules the updates will also happens and all of this will be done atomically to prevent the race condition among different concurrent fastapi workers handling differne requests issured using the same chat_id or thread_id. after that the next step will be the cache look up which will be done using the dependecy cachemanager. cache manage getusage is a method that will look throught the same redis server which is running on docker container. in both the services the exact cahe or the semantic cache if cache hit whether it is exact or semantic the response is going to be returned and at the same time we will estimate the response tokens again and add it to the totals in the chatusage in redis using the chatrepository usage. and incase of cache miss we will move on to call the agent. using the production agent dependency wich is langgraph that has three node either the primary model or fallback model or error node. we have several attempts based on the setting to try the primary model after reach the max we will use the fall backmodel incase also the fall back model fails we will return an error but incase either the primary or the fall back success we will return the response to the client and offcouse we will update the chatuage after estimating the output tokens 
+ 
+ 
+                        ┌─────────────────────────────┐
+                        │        CLIENT REQUEST       │
+                        │                             │
+                        │ message = "..."             │
+                        │ thread_id = "chat-123"      │
+                        └──────────────┬──────────────┘
+                                       │
+                                       ▼
+                    ┌───────────────────────────────────┐
+                    │       ChatService.process()       │
+                    │                                   │
+                    │ process(message, thread_id)       │
+                    └─────────────────┬─────────────────┘
+                                      │
+                                      ▼
+════════════════════════════════════════════════════════════════════
+                    1. INPUT SECURITY PIPELINE
+════════════════════════════════════════════════════════════════════
+                                      │
+                                      ▼
+                    SecurityPipeline.check_input(message)
+                                      │
+                                      ▼
+                      ┌──────────────────────────┐
+                      │ PROMPT INJECTION CHECK   │
+                      │ InputSanitizer.check()   │
+                      └─────────────┬────────────┘
+                                    │
+                     ┌──────────────┴──────────────┐
+                     │                             │
+                 UNSAFE                         SAFE
+                     │                             │
+                     ▼                             ▼
+        ┌────────────────────────┐      InputSanitizer.clean()
+        │ Reject immediately     │                │
+        │                        │                ▼
+        │ success = False        │      cleaned input
+        │ response = None        │                │
+        │ security notes =       │                ▼
+        │ injection reason       │      ┌──────────────────────┐
+        └────────────────────────┘      │      PII CHECK       │
+                                       │ PIIDetector.detect() │
+                                       └──────────┬───────────┘
+                                                  │
+                                ┌─────────────────┴─────────────────┐
+                                │                                   │
+                            NO PII                               PII FOUND
+                                │                                   │
+                                │                                   ▼
+                                │                         PIIDetector.mask()
+                                │                                   │
+                                │                                   ▼
+                                │                          Replace sensitive
+                                │                          information with
+                                │                          masked values
+                                │                                   │
+                                │                                   ▼
+                                │                       input_security_notes
+                                │                       updated with detected
+                                │                       PII categories
+                                │                                   │
+                                └─────────────────┬─────────────────┘
+                                                  │
+                                                  ▼
+                                         cleaned_message
+
+
+════════════════════════════════════════════════════════════════════
+                  2. TOKEN BUDGET — FIRST LAYER
+════════════════════════════════════════════════════════════════════
+                                                  │
+                                                  ▼
+                             TokenBudget.check_input(
+                                  cleaned_message
+                             )
+                                                  │
+                                                  ▼
+                              estimate input tokens
+                                                  │
+                                                  ▼
+                         estimated_input_tokens
+                                                  │
+                            ┌─────────────────────┴──────────────────┐
+                            │                                        │
+                  > max_input_tokens                         <= max_input_tokens
+                            │                                        │
+                            ▼                                        ▼
+                   Reject request                       Continue processing
+                   immediately                                  │
+                                                                 ▼
+
+                                  ChatUsageRepository
+                                       .get_usage(
+                                           thread_id
+                                       )
+                                             │
+                                             │
+                                             ▼
+════════════════════════════════════════════════════════════════════
+                       SHARED REDIS SERVER
+                     Docker Redis Container
+════════════════════════════════════════════════════════════════════
+
+Redis key:
+
+token_usage:chat:<thread_id>
+
+Example:
+
+token_usage:chat:chat-123
+
+Stored Redis hash:
+
+┌─────────────────────────────────────┐
+│ total_input_tokens                  │
+│ total_output_tokens                 │
+│ total_requests                     │
+└─────────────────────────────────────┘
+
+                                             │
+                                             ▼
+                                      ChatUsage object
+                                             │
+                                             ▼
+                              TokenBudget.check_chat(
+                                  usage,
+                                  estimated_input_tokens
+                              )
+                                             │
+                                             │
+                     ┌───────────────────────┼────────────────────────┐
+                     │                       │                        │
+                     ▼                       ▼                        ▼
+             request count            total chat tokens      request allowed
+             exceeded?                would exceed limit?          │
+                     │                       │                      │
+                    YES                     YES                    NO
+                     │                       │                      │
+                     ▼                       ▼                      ▼
+                  REJECT                  REJECT              Continue
+
+
+Checks logically include:
+
+ current requests
+      =
+ usage.total_requests
+
+ current tokens
+      =
+ total_input_tokens
+ +
+ total_output_tokens
+
+ projected tokens
+      =
+ current tokens
+ +
+ estimated tokens of this new input
+
+
+════════════════════════════════════════════════════════════════════
+             3. TOKEN BUDGET — SECOND / ATOMIC LAYER
+════════════════════════════════════════════════════════════════════
+
+Why another check?
+
+The first check is useful, but it is NOT enough for concurrency.
+
+Example:
+
+                Browser Tab A
+                      │
+                      ▼
+                  Request A
+                      │
+                      ▼
+                FastAPI Worker 1
+                      
+                Browser Tab B
+                      │
+                      ▼
+                  Request B
+                      │
+                      ▼
+                FastAPI Worker 2
+
+
+Both requests may belong to:
+
+thread_id = "chat-123"
+
+
+Worker 1                            Worker 2
+   │                                  │
+   ▼                                  ▼
+read usage = 49                    read usage = 49
+   │                                  │
+   ▼                                  ▼
+Layer 1 passes                    Layer 1 passes
+
+If limit = 50, both workers could believe another request is allowed.
+
+                    ↓
+                RACE CONDITION
+
+
+Therefore:
+
+ChatUsageRepository.reserve_request(...)
+                     │
+                     ▼
+              Redis Lua Script
+                     │
+                     ▼
+
+════════════════════════════════════════════════════════════════════
+                   LUA EXECUTES INSIDE REDIS
+════════════════════════════════════════════════════════════════════
+
+Redis atomically performs:
+
+        READ CURRENT REDIS STATE
+                  │
+                  ▼
+        total_input_tokens
+        total_output_tokens
+        total_requests
+                  │
+                  ▼
+       Check request limit
+                  │
+                  ▼
+       Check projected token limit
+                  │
+          ┌───────┴────────┐
+          │                │
+       REJECT            ALLOW
+          │                │
+          │                ▼
+          │        HINCRBY input tokens
+          │                │
+          │                ▼
+          │        HINCRBY requests
+          │                │
+          └─────────┬──────┘
+                    │
+                    ▼
+        Lua operation completes
+
+
+The entire:
+
+READ → CHECK → UPDATE
+
+is one atomic Redis operation.
+
+No other FastAPI worker can modify the relevant Redis state
+in the middle of this Lua execution.
+
+
+Example:
+
+Worker 1 Lua                    Worker 2 Lua
+
+current requests = 49
+       │
+       ▼
+allowed
+       │
+       ▼
+requests = 50
+       │
+       ▼
+Lua finishes
+                                  │
+                                  ▼
+                           current requests = 50
+                                  │
+                                  ▼
+                               REJECT
+
+
+This is what prevents concurrent requests using the same
+thread_id from exceeding the configured limits.
+
+
+════════════════════════════════════════════════════════════════════
+                       4. CACHE LOOKUP
+════════════════════════════════════════════════════════════════════
+                                  │
+                                  ▼
+                         CacheManager.get(
+                             cleaned_message
+                         )
+                                  │
+                                  ▼
+                       ┌────────────────────┐
+                       │    EXACT CACHE     │
+                       └─────────┬──────────┘
+                                 │
+                       ┌─────────┴─────────┐
+                       │                   │
+                      HIT                 MISS
+                       │                   │
+                       │                   ▼
+                       │        ┌────────────────────┐
+                       │        │  SEMANTIC CACHE    │
+                       │        └─────────┬──────────┘
+                       │                  │
+                       │        ┌─────────┴──────────┐
+                       │        │                    │
+                       │       HIT                  MISS
+                       │        │                    │
+                       └────┬───┘                    │
+                            │                        │
+                            ▼                        ▼
+                       CACHE HIT                CALL AGENT
+
+
+Both cache implementations use the shared Redis infrastructure.
+
+Exact cache:
+cleaned query → exact cache key → Redis
+
+Semantic cache:
+cleaned query
+      ↓
+embedding
+      ↓
+Redis vector search
+      ↓
+similar cached query/response
+
+
+If the cache lookup itself fails:
+
+Redis / embedding / semantic search failure
+                  │
+                  ▼
+             exception caught
+                  │
+                  ▼
+       treat it as CACHE MISS
+                  │
+                  ▼
+             call Agent
+
+
+A cache failure therefore does NOT make the chat unavailable.
+
+
+════════════════════════════════════════════════════════════════════
+                         5A. CACHE HIT
+════════════════════════════════════════════════════════════════════
+
+                    cached_response
+                          │
+                          ▼
+               estimate output tokens
+                          │
+                          ▼
+         TokenBudget.estimate_tokens(
+               cached_response
+         )
+                          │
+                          ▼
+       ChatUsageRepository.record_output_usage(
+               thread_id,
+               output_tokens
+       )
+                          │
+                          ▼
+                    Redis HINCRBY
+                          │
+                          ▼
+             total_output_tokens updated
+                          │
+                          ▼
+                     RETURN RESPONSE
+
+
+Even though no LLM was called, the conversation usage is still
+updated because the user received another response in this chat.
+
+If usage recording fails:
+
+                    Redis failure
+                         │
+                         ▼
+                    ignore failure
+                         │
+                         ▼
+              still return cache result
+
+
+════════════════════════════════════════════════════════════════════
+                         5B. CACHE MISS
+════════════════════════════════════════════════════════════════════
+                              │
+                              ▼
+                       ProductionAgent
+                              │
+                              │
+                    synchronous invoke()
+                              │
+                              ▼
+               asyncio.to_thread(...)
+                              │
+                              ▼
+            run Agent outside FastAPI
+                 event-loop thread
+                              │
+                              ▼
+
+
+════════════════════════════════════════════════════════════════════
+                        LANGGRAPH AGENT
+════════════════════════════════════════════════════════════════════
+
+                            START
+                              │
+                              ▼
+                       PRIMARY MODEL
+                              │
+                       ┌──────┴───────┐
+                       │              │
+                    SUCCESS         FAILURE
+                       │              │
+                       │              ▼
+                       │          retry logic
+                       │              │
+                       │       configured attempts
+                       │              │
+                       │       ┌──────┴───────┐
+                       │       │              │
+                       │   SUCCESS       attempts exhausted
+                       │       │              │
+                       │       │              ▼
+                       │       │        FALLBACK MODEL
+                       │       │              │
+                       │       │      ┌───────┴────────┐
+                       │       │      │                │
+                       │       │   SUCCESS           FAILURE
+                       │       │      │                │
+                       │       │      │                ▼
+                       │       │      │            ERROR NODE
+                       │       │      │                │
+                       └───────┴──────┴──────┐         │
+                                             │         │
+                                             ▼         ▼
+                                          RESPONSE   ERROR
+
+
+════════════════════════════════════════════════════════════════════
+                     6. AGENT RESULT CHECK
+════════════════════════════════════════════════════════════════════
+
+                     agent_result
+                          │
+                          ▼
+                 agent_result["error"]
+                          │
+                ┌─────────┴─────────┐
+                │                   │
+             ERROR               None
+                │                   │
+                ▼                   ▼
+        return failure      response processing
+
+
+If invoke() itself throws before an agent_result exists:
+
+self.agent.invoke(...)
+        │
+        ▼
+raises exception
+        │
+        ▼
+ChatService catches it
+        │
+        ▼
+return failure
+
+
+════════════════════════════════════════════════════════════════════
+                    7. RESPONSE NORMALIZATION
+════════════════════════════════════════════════════════════════════
+                               │
+                               ▼
+                  agent_result["response"]
+                               │
+                               ▼
+                normalize_agent_response(...)
+                               │
+                               ▼
+                      plain text response
+                               │
+                               ▼
+
+If response is missing / unsupported / invalid:
+
+                         exception
+                             │
+                             ▼
+                        return failure
+
+
+════════════════════════════════════════════════════════════════════
+                      8. OUTPUT SECURITY
+════════════════════════════════════════════════════════════════════
+                               │
+                               ▼
+                SecurityPipeline.check_output(
+                         response
+                )
+                               │
+                               ▼
+                     OutputValidator
+                               │
+                               ▼
+                      cleaned_response
+                               +
+                  output_security_notes
+
+
+The response is cleaned/validated BEFORE:
+
+    token accounting
+    caching
+    returning it to the client
+
+
+════════════════════════════════════════════════════════════════════
+                     9. OUTPUT TOKEN USAGE
+════════════════════════════════════════════════════════════════════
+                               │
+                               ▼
+                  estimate output tokens
+                               │
+                               ▼
+       ChatUsageRepository.record_output_usage(
+                    thread_id,
+                    output_tokens
+       )
+                               │
+                               ▼
+                         Redis
+                               │
+                               ▼
+                total_output_tokens += N
+
+
+So after a successful generated request, Redis contains approximately:
+
+token_usage:chat:<thread_id>
+
+┌─────────────────────────────────┐
+│ total_input_tokens  += input    │
+│ total_output_tokens += output   │
+│ total_requests      += 1        │
+└─────────────────────────────────┘
+
+
+If output usage tracking fails:
+
+                 Redis error
+                     │
+                     ▼
+              response is NOT lost
+                     │
+                     ▼
+                  continue
+
+
+════════════════════════════════════════════════════════════════════
+                       10. CACHE RESPONSE
+════════════════════════════════════════════════════════════════════
+                               │
+                               ▼
+                     CacheManager.set(
+                       cleaned_message,
+                       cleaned_response
+                     )
+                               │
+                 ┌─────────────┴──────────────┐
+                 │                            │
+                 ▼                            ▼
+             EXACT CACHE               SEMANTIC CACHE
+                 │                            │
+                 └─────────────┬──────────────┘
+                               │
+                               ▼
+                         Redis server
+
+
+If cache storage fails:
+
+                cache exception
+                     │
+                     ▼
+                 ignore failure
+                     │
+                     ▼
+          still return LLM response
+
+
+════════════════════════════════════════════════════════════════════
+                       11. FINAL RESPONSE
+════════════════════════════════════════════════════════════════════
+
+ChatService returns approximately:
+
+{
+    "success": True,
+    "response": cleaned_response,
+    "cleaned_message": cleaned_message,
+    "input_security_notes": ...,
+    "output_security_notes": ...,
+    "cached": False,
+    "cache_type": ...,
+    "model_used": ...,
+    "error": None
+}
+
+                               │
+                               ▼
+                         FastAPI route
+                               │
+                               ▼
+                         HTTP response
+                               │
+                               ▼
+                            CLIENT
